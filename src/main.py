@@ -14,7 +14,7 @@ bot = Bot(token='8104630789:AAGAZ-ITfW3F0Rtno-h8iFUIiKqkxl1gqu0')
 dp = Dispatcher()
 FILE_PUT = "donors.xlsx"
 
-# ID чата, куда пересылаются вопросы (замени на реальный)
+# ID чата, куда пересылаются вопросы
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-1002709368305"))
 
 # --- Главное меню ---
