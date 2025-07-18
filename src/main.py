@@ -121,13 +121,16 @@ async def contact_handler(message: types.Message, state: FSMContext):
         await state.set_state(SostoyaniyaRegistracii.podtverzhdenie_fio)
     else:
         await message.answer(
-            "Похоже, ты у нас впервые! Для продолжения нужно принять условия использования данных.",
+            "Похоже, ты у нас впервые! Для продолжения, пожалуйста, ознакомься с "
+            "[политикой обработки персональных данных](https://telegra.ph/POLITIKA-NIYAU-MIFI-V-OTNOSHENII-OBRABOTKI-PERSONALNYH-DANNYH-07-18) " 
+            "и нажми кнопку ниже.",
+            parse_mode="Markdown",
+            disable_web_page_preview=True, # отключаем превью, чтобы не было громоздко
             reply_markup=knopki_soglasiya
         )
         await state.set_state(SostoyaniyaRegistracii.ozhidanie_soglasiya)
 
 # Обработчик нажатия на кнопку "Принимаю условия"
-# TODO!!!!!!! Текст
 @dp.callback_query(SostoyaniyaRegistracii.ozhidanie_soglasiya, F.data == "soglasen")
 async def obrabotchik_soglasiya(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Отлично! Теперь введи, пожалуйста, свои Фамилию Имя Отчество.")
@@ -143,8 +146,15 @@ async def obrabotchik_podtverzhdeniya_fio(callback: types.CallbackQuery, state: 
         await bot.send_message(callback.from_user.id, "Главное меню:", reply_markup=menu_kb)
     else:
         # Если юзер сказал "нет, это не я", запускаем регистрацию заново
-        await callback.message.edit_text("Понял. Давай тогда пройдем регистрацию. Для начала - прими условия.")
-        await callback.message.answer("Текст соглашения...", reply_markup=knopki_soglasiya)
+        await callback.message.edit_text("Понял. Давай тогда пройдем регистрацию.")
+        await callback.message.answer(
+            "Для начала, пожалуйста, ознакомься с "
+            "[политикой обработки персональных данных](https://telegra.ph/POLITIKA-NIYAU-MIFI-V-OTNOSHENII-OBRABOTKI-PERSONALNYH-DANNYH-07-18) "
+            "и нажми кнопку ниже.",
+            parse_mode="Markdown",
+            disable_web_page_preview=True, # отключаем превью, чтобы не было громоздко
+            reply_markup=knopki_soglasiya
+        )
         await state.set_state(SostoyaniyaRegistracii.ozhidanie_soglasiya)
 
 
@@ -152,18 +162,29 @@ async def obrabotchik_podtverzhdeniya_fio(callback: types.CallbackQuery, state: 
 @dp.message(SostoyaniyaRegistracii.ozhidanie_fio)
 async def obrabotchik_fio(message: types.Message, state: FSMContext):
     fio = message.text.strip()
-    # простенькая проверка на валиднорсть 
-    # TODO!!!!!!! Валидация
-    if len(fio.split()) < 2:
-        await message.answer("Пожалуйста, введи полное Фамилию Имя Отчество. Например: Иванов Иван Иванович")
+    
+    # Улучшенная валидация ФИО
+    # 1. Проверка на количество слов (должно быть 2 или 3)
+    if not (2 <= len(fio.split()) <= 3):
+        await message.answer("Пожалуйста, введи полное Фамилию Имя Отчество (или Фамилию и Имя).")
         return
         
-    # фильтр имени
+    # 2. Проверка на запрещенные символы (разрешены только русские буквы, пробелы и дефисы)
+    if re.search(r'[^а-яА-ЯёЁ\s-]', fio):
+        await message.answer("В ФИО могут быть только русские буквы, пробелы и дефис. Попробуй еще раз.")
+        return
+
+    # Приводим ФИО к красивому виду: "Иванов Иван-Петрович"
     fio_krasivoe = " ".join([word.capitalize() for word in fio.split()])
     
     await state.update_data(fio=fio_krasivoe)
     await message.answer("Спасибо! Теперь выбери свою категорию:", reply_markup=knopki_kategoriy)
     await state.set_state(SostoyaniyaRegistracii.ozhidanie_kategorii)
+
+# Обработчик на случай, если пользователь пишет текстом вместо нажатия кнопки категории
+@dp.message(SostoyaniyaRegistracii.ozhidanie_kategorii)
+async def nepravilnaya_kategoriya(message: types.Message):
+    await message.answer("Пожалуйста, выбери один из вариантов на кнопках ниже.")
 
 # выбор категории
 @dp.callback_query(SostoyaniyaRegistracii.ozhidanie_kategorii)
@@ -199,7 +220,13 @@ async def obrabotchik_kategorii(callback: types.CallbackQuery, state: FSMContext
 # обработчик, который ловит номер группы
 @dp.message(SostoyaniyaRegistracii.ozhidanie_gruppy)
 async def obrabotchik_gruppy(message: types.Message, state: FSMContext):
-    gruppa = message.text.strip()
+    gruppa = message.text.strip().upper()
+
+    # Валидация формата группы (например, А22-501)
+    if not re.match(r'^[А-Я]\d{2}-\d{3}$', gruppa):
+        await message.answer("Неверный формат группы. Пожалуйста, введи номер в формате X00-000, например: А22-501")
+        return
+
     await state.update_data(gruppa=gruppa)
     
     await message.answer("Отлично, регистрация почти завершена!")
