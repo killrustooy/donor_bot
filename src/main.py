@@ -2,6 +2,7 @@ import asyncio
 import logging
 import pandas as pd
 import re
+import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -13,6 +14,23 @@ bot = Bot(token='8104630789:AAGAZ-ITfW3F0Rtno-h8iFUIiKqkxl1gqu0')
 dp = Dispatcher()
 FILE_PUT = "donors.xlsx"
 
+# ID чата, куда пересылаются вопросы (замени на реальный)
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-1002709368305"))
+
+# --- Главное меню ---
+menu_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="Вопрос организаторам")]],
+    resize_keyboard=True
+)
+
+# Кнопка для запроса номера телефона (показывается при старте)
+knopka_dlya_nomera = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="Отправить мой номер 📱", request_contact=True)]],
+    resize_keyboard=True
+)
+
+# --- Состояния ---
+
 class SostoyaniyaRegistracii(StatesGroup):
     ozhidanie_soglasiya = State()
     ozhidanie_fio = State()
@@ -20,12 +38,9 @@ class SostoyaniyaRegistracii(StatesGroup):
     ozhidanie_gruppy = State()
     podtverzhdenie_fio = State()
 
-# --- Клавиатуры ---
-# Кнопка для запроса номера телефона
-knopka_dlya_nomera = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="Отправить мой номер 📱", request_contact=True)]],
-    resize_keyboard=True
-)
+
+class SostoyaniyaVoprosa(StatesGroup):
+    ozhidanie_voprosa = State()
 
 # Кнопки для согласия
 knopki_soglasiya = InlineKeyboardMarkup(
@@ -91,7 +106,7 @@ async def command_start(message: types.Message, state: FSMContext):
 @dp.message(F.contact)
 async def contact_handler(message: types.Message, state: FSMContext):
     nomer_telefona = message.contact.phone_number.replace("+", "")
-    await state.update_data(nomer_telefona=nomer_telefona) # Сохраняем номер в память
+    await state.update_data(nomer_telefona=nomer_telefona, username=message.from_user.username)  # Сохраняем номер и username
     
     # убираем кнопку с номером телефона
     await message.answer("Спасибо, номер получен!", reply_markup=ReplyKeyboardRemove())
@@ -123,8 +138,9 @@ async def obrabotchik_soglasiya(callback: types.CallbackQuery, state: FSMContext
 async def obrabotchik_podtverzhdeniya_fio(callback: types.CallbackQuery, state: FSMContext):
     if callback.data == 'fio_verno':
         await callback.message.edit_text("Отлично! Рад снова тебя видеть.")
-        # Тут будет переход в главное меню
-        await state.clear()
+        # Переход в главное меню
+        await state.set_state(None)
+        await bot.send_message(callback.from_user.id, "Главное меню:", reply_markup=menu_kb)
     else:
         # Если юзер сказал "нет, это не я", запускаем регистрацию заново
         await callback.message.edit_text("Понял. Давай тогда пройдем регистрацию. Для начала - прими условия.")
@@ -177,7 +193,8 @@ async def obrabotchik_kategorii(callback: types.CallbackQuery, state: FSMContext
         
         await callback.message.edit_text("Ты успешно зарегистрирован!")
         # переход в главное меню
-        await state.clear()
+        await state.set_state(None)
+        await bot.send_message(callback.from_user.id, "Главное меню:", reply_markup=menu_kb)
 
 # обработчик, который ловит номер группы
 @dp.message(SostoyaniyaRegistracii.ozhidanie_gruppy)
@@ -198,7 +215,42 @@ async def obrabotchik_gruppy(message: types.Message, state: FSMContext):
     
     await message.answer("Ты успешно зарегистрирован!")
     # и снова переход в главное меню
-    await state.clear()
+    await state.set_state(None)
+    await message.answer("Главное меню:", reply_markup=menu_kb)
+
+# --- Запуск бота ---
+
+# --- Вопросы организаторам ---
+
+@dp.message(lambda msg: msg.text == "Вопрос организаторам")
+async def start_question(message: types.Message, state: FSMContext):
+    await message.answer("Напиши свой вопрос, и я передам его организаторам.", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(SostoyaniyaVoprosa.ozhidanie_voprosa)
+
+
+@dp.message(SostoyaniyaVoprosa.ozhidanie_voprosa)
+async def recieve_question(message: types.Message, state: FSMContext):
+    dannie_usera = await state.get_data()
+    phone = dannie_usera.get("nomer_telefona", "не указан")
+    fio = dannie_usera.get("fio", "Не указано")
+    username = dannie_usera.get("username") or message.from_user.username or "нет username"
+
+    # Пересылаем сообщение с вопросом и сохраняем ссылку на автора
+    await bot.forward_message(ADMIN_CHAT_ID, message.chat.id, message.message_id)
+    await bot.send_message(ADMIN_CHAT_ID, f"Вопрос от {fio} (тел: {phone}, @{username})")
+
+    await message.answer("Спасибо! Вопрос отправлен организаторам.", reply_markup=menu_kb)
+    await state.set_state(None)
+
+
+@dp.message(F.chat.id == ADMIN_CHAT_ID, F.reply_to_message)
+async def answer_to_user(message: types.Message):
+    # Если организатор отвечает на пересланное сообщение, отправляем ответ пользователю
+    if message.reply_to_message and message.reply_to_message.forward_from:
+        user_id = message.reply_to_message.forward_from.id
+        await bot.send_message(user_id, f"Ответ от организаторов:\n{message.text}")
+        await message.answer("✅ Ответ отправлен пользователю.")
+
 
 # --- Запуск бота ---
 async def main():
