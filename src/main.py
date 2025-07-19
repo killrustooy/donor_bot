@@ -3,12 +3,14 @@ import logging
 import pandas as pd
 import re
 import os
+import time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from typing import Union
+from aiogram.exceptions import TelegramBadRequest
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token='8104630789:AAGAZ-ITfW3F0Rtno-h8iFUIiKqkxl1gqu0')
@@ -17,14 +19,22 @@ FILE_PUT = "donors.xlsx"
 
 # ID чата, куда пересылаются вопросы
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-1002709368305"))
+# Словари для опросов и лимитов
+questions_map: dict[int, int] = {}
+last_question_time: dict[int, float] = {}
 
 # --- Главное меню ---
 menu_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Личный кабинет")],
-        [KeyboardButton(text="Информация о донорстве")],
-        [KeyboardButton(text="Вопрос организаторам")]
+        [KeyboardButton(text="Вопрос организаторам"), KeyboardButton(text="Личный кабинет")],
+        [KeyboardButton(text="Информация о донорстве")]
     ],
+    resize_keyboard=True
+)
+
+# Универсальная кнопка «Главное меню»
+back_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="Главное меню")]],
     resize_keyboard=True
 )
 
@@ -87,16 +97,22 @@ knopka_svyazi_konflikt = InlineKeyboardMarkup(
     ]
 )
 
+# Кнопка «Назад» для инфо-разделов
+knopka_info_back = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="info_back")]]
+)
+
 # --- Функции для работы с Excel ---
 
 def nayti_usera_po_telegram_id(telegram_id):
     try:
-        baza_dannyh = pd.read_excel(FILE_PUT, engine='openpyxl')
-        if 'Телеграм' not in baza_dannyh.columns:
+        df = pd.read_excel(FILE_PUT, engine='openpyxl')
+        if 'Телеграм' not in df.columns:
             return None
-        user = baza_dannyh[baza_dannyh['Телеграм'].astype(str) == str(telegram_id)]
-        if not user.empty:
-            return user.iloc[0]
+        df['Телеграм'] = df['Телеграм'].astype(str).str.replace(r'\.0$', '', regex=True)
+        match = df[df['Телеграм'] == str(telegram_id)]
+        if not match.empty:
+            return match.iloc[0]
     except FileNotFoundError:
         return None
     return None
@@ -120,7 +136,7 @@ def obnovit_telegram_id(nomer_telefona, telegram_id):
         if idx_list:
             if 'Телеграм' not in df.columns:
                 df['Телеграм'] = None
-            df.loc[idx_list[0], 'Телеграм'] = telegram_id
+            df.loc[idx_list[0], 'Телеграм'] = str(telegram_id)
             df = df.drop(columns=['Телефон_чистый'])
             df.to_excel(FILE_PUT, index=False)
     except Exception:
@@ -133,6 +149,7 @@ def dobavit_usera(dannie):
         df = pd.DataFrame(columns=['ФИО', 'Группа', 'Телефон', 'Телеграм'])
     if 'Телеграм' not in df.columns:
         df['Телеграм'] = None
+    dannie['Телеграм'] = str(dannie.get('Телеграм')) if dannie.get('Телеграм') else None
     noviy_user = pd.DataFrame([dannie])
     df = pd.concat([df, noviy_user], ignore_index=True)
     df.to_excel(FILE_PUT, index=False)
@@ -169,7 +186,7 @@ async def contact_handler(message: types.Message, state: FSMContext):
     else:
         await message.answer(
             "Похоже, ты у нас впервые! Для продолжения, пожалуйста, ознакомься с "
-            "[политикой обработки персональных данных](https://telegra.ph/POLITIKA-NIYAU-MIFI-V-OTNOSHENII-OBRABOTKI-PERSONALNYH-DANNYH-07-18) " 
+            "[политикой обработки персональных данных](https://telegra.ph/POLITIKA-NIYAU-MIFI-V-OTNOSHENII-OBRABOTKI-PERSONALNYH-DANNYH-07-18) "
             "и нажми кнопку ниже.",
             parse_mode="Markdown",
             disable_web_page_preview=True, # отключаем превью, чтобы не было громоздко
@@ -203,13 +220,13 @@ async def obrabotchik_podtverzhdeniya_fio(callback: types.CallbackQuery, state: 
 @dp.message(SostoyaniyaRegistracii.ozhidanie_fio)
 async def obrabotchik_fio(message: types.Message, state: FSMContext):
     fio = message.text.strip()
-    
+
     # Улучшенная валидация ФИО
     # 1. Проверка на количество слов (должно быть 2 или 3)
     if not (2 <= len(fio.split()) <= 3):
         await message.answer("Пожалуйста, введи полное Фамилию Имя Отчество (или Фамилию и Имя).")
         return
-        
+
     # 2. Проверка на запрещенные символы (разрешены только русские буквы, пробелы и дефисы)
     if re.search(r'[^а-яА-ЯёЁ\s-]', fio):
         await message.answer("В ФИО могут быть только русские буквы, пробелы и дефис. Попробуй еще раз.")
@@ -217,7 +234,7 @@ async def obrabotchik_fio(message: types.Message, state: FSMContext):
 
     # Приводим ФИО к красивому виду: "Иванов Иван-Петрович"
     fio_krasivoe = " ".join([word.capitalize() for word in fio.split()])
-    
+
     await state.update_data(fio=fio_krasivoe)
     await message.answer("Спасибо! Теперь выбери свою категорию:", reply_markup=knopki_kategoriy)
     await state.set_state(SostoyaniyaRegistracii.ozhidanie_kategorii)
@@ -232,20 +249,20 @@ async def nepravilnaya_kategoriya(message: types.Message):
 async def obrabotchik_kategorii(callback: types.CallbackQuery, state: FSMContext):
     kategoriya_eng = callback.data.split('_')[1] # вытаскиваем 'student', 'sotrudnik' или 'vneshniy'
     await state.update_data(kategoriya=kategoriya_eng)
-    
+
     if kategoriya_eng == "student":
         await callback.message.edit_text("Понял. Теперь введи номер своей учебной группы.")
         await state.set_state(SostoyaniyaRegistracii.ozhidanie_gruppy)
     else:
         dannie_usera = await state.get_data()
-        
+
         # переводим на русский для записи в файл
         kategorii_map = {
             'sotrudnik': 'Сотрудник',
             'vneshniy': 'Внешний донор'
         }
         kategoriya_rus = kategorii_map.get(dannie_usera.get('kategoriya'), 'Не указана')
-        
+
         zapis = {
             'Телефон': dannie_usera.get('nomer_telefona'),
             'ФИО': dannie_usera.get('fio'),
@@ -253,7 +270,7 @@ async def obrabotchik_kategorii(callback: types.CallbackQuery, state: FSMContext
             'Телеграм': dannie_usera.get('telegram_id'),
         }
         dobavit_usera(zapis)
-        
+
         await callback.message.edit_text("Ты успешно зарегистрирован!")
         # переход в главное меню
         await state.clear()
@@ -270,10 +287,10 @@ async def obrabotchik_gruppy(message: types.Message, state: FSMContext):
         return
 
     await state.update_data(gruppa=gruppa)
-    
+
     await message.answer("Отлично, регистрация почти завершена!")
     dannie_usera = await state.get_data()
-    
+
     zapis = {
         'Телефон': dannie_usera.get('nomer_telefona'),
         'ФИО': dannie_usera.get('fio'),
@@ -282,7 +299,7 @@ async def obrabotchik_gruppy(message: types.Message, state: FSMContext):
         # ... и другие колонки
     }
     dobavit_usera(zapis)
-    
+
     await message.answer("Ты успешно зарегистрирован!")
     # и снова переход в главное меню
     await state.clear()
@@ -328,10 +345,19 @@ async def send_info(callback: types.CallbackQuery):
             "**Ближайший День Донора:**\n"
             "Следите за анонсами!"
         )
-    
-    await callback.message.edit_text(text, parse_mode="Markdown")
+
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=knopka_info_back)
     # Чтобы убрать часики на кнопке
     await callback.answer()
+
+# Хендлер возврата из инфо-раздела
+@dp.callback_query(F.data == "info_back")
+async def info_back(callback: types.CallbackQuery):
+    await callback.answer()
+    try:
+        await callback.message.edit_text("Выберите интересующий вас раздел:", reply_markup=knopki_info)
+    except TelegramBadRequest:
+        await callback.message.edit_reply_markup(reply_markup=knopki_info)
 
 # --- Личный кабинет ---
 @dp.message(F.text == "Личный кабинет")
@@ -401,7 +427,7 @@ async def start_question_dialog(message_or_callback: Union[types.Message, types.
         message = message_or_callback.message
     else:
         message = message_or_callback
-    await message.answer("Напиши свой вопрос, и я передам его организаторам.", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Напиши свой вопрос, и я передам его организаторам.", reply_markup=back_kb)
     await state.set_state(SostoyaniyaVoprosa.ozhidanie_voprosa)
 
 @dp.message(F.text == "Вопрос организаторам")
@@ -415,14 +441,21 @@ async def start_question_inline(callback: types.CallbackQuery, state: FSMContext
 
 @dp.message(SostoyaniyaVoprosa.ozhidanie_voprosa)
 async def recieve_question(message: types.Message, state: FSMContext):
+    # Rate-limit 10 сек
+    now = time.time()
+    last = last_question_time.get(message.from_user.id, 0)
+    if now - last < 10:
+        await message.answer("Пожалуйста, подождите 10 секунд между вопросами.")
+        return
+
     dannie_usera = await state.get_data()
     phone = dannie_usera.get("nomer_telefona", "не указан")
     fio = dannie_usera.get("fio", "Не указано")
     username = dannie_usera.get("username") or message.from_user.username or "нет username"
 
-    # Пересылаем сообщение с вопросом и сохраняем ссылку на автора
-    await bot.forward_message(ADMIN_CHAT_ID, message.chat.id, message.message_id)
-    await bot.send_message(ADMIN_CHAT_ID, f"Вопрос от {fio} (тел: {phone}, @{username})")
+    fwd_msg = await bot.forward_message(ADMIN_CHAT_ID, message.chat.id, message.message_id)
+    questions_map[fwd_msg.message_id] = message.from_user.id
+    last_question_time[message.from_user.id] = now
 
     await message.answer("Спасибо! Вопрос отправлен организаторам.", reply_markup=menu_kb)
     await state.set_state(None)
@@ -430,12 +463,29 @@ async def recieve_question(message: types.Message, state: FSMContext):
 
 @dp.message(F.chat.id == ADMIN_CHAT_ID, F.reply_to_message)
 async def answer_to_user(message: types.Message):
-    # Если организатор отвечает на пересланное сообщение, отправляем ответ пользователю
-    if message.reply_to_message and message.reply_to_message.forward_from:
-        user_id = message.reply_to_message.forward_from.id
+    user_id = None
+    if message.reply_to_message:
+        user_id = questions_map.get(message.reply_to_message.message_id)
+        if not user_id and message.reply_to_message.forward_from:
+            user_id = message.reply_to_message.forward_from.id
+
+    if user_id:
         await bot.send_message(user_id, f"Ответ от организаторов:\n{message.text}")
         await message.answer("✅ Ответ отправлен пользователю.")
+    else:
+        await message.answer("⚠️ Не удалось определить пользователя. Возможно, сообщение не было переслано ботом или данные утрачены.")
 
+
+# --- Блокировка команд в группах ---
+@dp.message(F.text.startswith("/"), F.chat.type.in_(["group", "supergroup"]))
+async def ignore_group_commands(message: types.Message):
+    return
+
+# --- Переход в главное меню из любой точки ---
+@dp.message(F.text.casefold() == "главное меню")
+async def go_main_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Главное меню:", reply_markup=menu_kb)
 
 # --- Запуск бота ---
 async def main():
