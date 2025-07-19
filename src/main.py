@@ -8,14 +8,12 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
+from typing import Union
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token='8104630789:AAGAZ-ITfW3F0Rtno-h8iFUIiKqkxl1gqu0')
 dp = Dispatcher()
 FILE_PUT = "donors.xlsx"
-
-# Простое хранилище в памяти для связки user_id -> phone_number
-user_phone_numbers = {}
 
 # ID чата, куда пересылаются вопросы
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-1002709368305"))
@@ -82,8 +80,27 @@ knopki_info = InlineKeyboardMarkup(
     ]
 )
 
+# Кнопка для связи с организаторами, которую мы покажем при конфликте
+knopka_svyazi_konflikt = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Написать организаторам", callback_data="ask_question_inline")]
+    ]
+)
 
-# Функция для поиска пользователя по номеру телефона
+# --- Функции для работы с Excel ---
+
+def nayti_usera_po_telegram_id(telegram_id):
+    try:
+        baza_dannyh = pd.read_excel(FILE_PUT, engine='openpyxl')
+        if 'Телеграм' not in baza_dannyh.columns:
+            return None
+        user = baza_dannyh[baza_dannyh['Телеграм'].astype(str) == str(telegram_id)]
+        if not user.empty:
+            return user.iloc[0]
+    except FileNotFoundError:
+        return None
+    return None
+
 def nayti_usera_po_nomeru(nomer_telefona):
     try:
         baza_dannyh = pd.read_excel(FILE_PUT, engine='openpyxl')
@@ -92,49 +109,59 @@ def nayti_usera_po_nomeru(nomer_telefona):
         if not user.empty:
             return user.iloc[0]
     except FileNotFoundError:
-        print(f"ОШИБКА: Файл {FILE_PUT} не найден!")
         return None
     return None
 
-# Функция для добавления нового пользователя
+def obnovit_telegram_id(nomer_telefona, telegram_id):
+    try:
+        df = pd.read_excel(FILE_PUT, engine='openpyxl')
+        df['Телефон_чистый'] = df['Телефон'].astype(str).str.replace(r'\D', '', regex=True)
+        idx_list = df.index[df['Телефон_чистый'].str.contains(nomer_telefona, na=False)].tolist()
+        if idx_list:
+            if 'Телеграм' not in df.columns:
+                df['Телеграм'] = None
+            df.loc[idx_list[0], 'Телеграм'] = telegram_id
+            df = df.drop(columns=['Телефон_чистый'])
+            df.to_excel(FILE_PUT, index=False)
+    except Exception:
+        pass
+
 def dobavit_usera(dannie):
     try:
-        baza_dannyh = pd.read_excel(FILE_PUT, engine='openpyxl')
+        df = pd.read_excel(FILE_PUT, engine='openpyxl')
     except FileNotFoundError:
-        baza_dannyh = pd.DataFrame(columns=['ФИО', 'Группа', 'Телефон'])
-    
+        df = pd.DataFrame(columns=['ФИО', 'Группа', 'Телефон', 'Телеграм'])
+    if 'Телеграм' not in df.columns:
+        df['Телеграм'] = None
     noviy_user = pd.DataFrame([dannie])
-    baza_dannyh = pd.concat([baza_dannyh, noviy_user], ignore_index=True)
-    baza_dannyh.to_excel(FILE_PUT, index=False)
+    df = pd.concat([df, noviy_user], ignore_index=True)
+    df.to_excel(FILE_PUT, index=False)
 
 
 # --- Обработчики команд и сообщений ---
 
-# Обработчик команды /start
 @dp.message(Command("start"))
 async def command_start(message: types.Message, state: FSMContext):
-    await state.clear() # На случай, если пользователь перезапустил бота на полпути
-    await message.answer(
-        "Привет! Я бот для доноров. Чтобы начать, мне нужен твой номер телефона.",
-        reply_markup=knopka_dlya_nomera
-    )
+    await state.clear()
+    user = nayti_usera_po_telegram_id(message.from_user.id)
+    if user is not None:
+        fio = user.get('ФИО', 'Донор')
+        await message.answer(f"С возвращением, {fio}!", reply_markup=menu_kb)
+    else:
+        await message.answer(
+            "Привет! Я бот для доноров. Чтобы начать, мне нужен твой номер телефона.",
+            reply_markup=knopka_dlya_nomera
+        )
 
-# Обработчик, который ловит контакт
 @dp.message(F.contact)
 async def contact_handler(message: types.Message, state: FSMContext):
     nomer_telefona = message.contact.phone_number.replace("+", "")
-    user_id = message.from_user.id
-    user_phone_numbers[user_id] = nomer_telefona # Сохраняем номер в наш словарь
-    
-    await state.update_data(nomer_telefona=nomer_telefona, username=message.from_user.username)  # Сохраняем номер и username
-    
-    # убираем кнопку с номером телефона
+    telegram_id = message.from_user.id
+    await state.update_data(nomer_telefona=nomer_telefona, username=message.from_user.username, telegram_id=telegram_id)
     await message.answer("Спасибо, номер получен!", reply_markup=ReplyKeyboardRemove())
-    
     user = nayti_usera_po_nomeru(nomer_telefona)
-    
     if user is not None:
-        # Если нашли юзера в базе
+        obnovit_telegram_id(nomer_telefona, telegram_id)
         fio = user['ФИО']
         await state.update_data(fio=fio)
         await message.answer(f"Привет! Ты - {fio}?", reply_markup=knopki_podtverzhdeniya_fio)
@@ -161,21 +188,15 @@ async def obrabotchik_soglasiya(callback: types.CallbackQuery, state: FSMContext
 async def obrabotchik_podtverzhdeniya_fio(callback: types.CallbackQuery, state: FSMContext):
     if callback.data == 'fio_verno':
         await callback.message.edit_text("Отлично! Рад снова тебя видеть.")
-        # Переход в главное меню
-        await state.set_state(None)
-        await bot.send_message(callback.from_user.id, "Главное меню:", reply_markup=menu_kb)
+        await callback.message.answer("Главное меню:", reply_markup=menu_kb)
+        await state.clear()
     else:
-        # Если юзер сказал "нет, это не я", запускаем регистрацию заново
-        await callback.message.edit_text("Понял. Давай тогда пройдем регистрацию.")
-        await callback.message.answer(
-            "Для начала, пожалуйста, ознакомься с "
-            "[политикой обработки персональных данных](https://telegra.ph/POLITIKA-NIYAU-MIFI-V-OTNOSHENII-OBRABOTKI-PERSONALNYH-DANNYH-07-18) "
-            "и нажми кнопку ниже.",
-            parse_mode="Markdown",
-            disable_web_page_preview=True, # отключаем превью, чтобы не было громоздко
-            reply_markup=knopki_soglasiya
+        await callback.message.edit_text(
+            "Этот номер телефона уже зарегистрирован на другого пользователя.\n"
+            "Если это ваш номер, но ФИО указано неверно, обратитесь к организаторам, нажав на кнопку ниже. ",
+            reply_markup=knopka_svyazi_konflikt
         )
-        await state.set_state(SostoyaniyaRegistracii.ozhidanie_soglasiya)
+        await state.clear()
 
 
 # Обработчик который ловит ФИО
@@ -229,12 +250,13 @@ async def obrabotchik_kategorii(callback: types.CallbackQuery, state: FSMContext
             'Телефон': dannie_usera.get('nomer_telefona'),
             'ФИО': dannie_usera.get('fio'),
             'Группа': kategoriya_rus,
+            'Телеграм': dannie_usera.get('telegram_id'),
         }
         dobavit_usera(zapis)
         
         await callback.message.edit_text("Ты успешно зарегистрирован!")
         # переход в главное меню
-        await state.set_state(None)
+        await state.clear()
         await bot.send_message(callback.from_user.id, "Главное меню:", reply_markup=menu_kb)
 
 # обработчик, который ловит номер группы
@@ -256,13 +278,14 @@ async def obrabotchik_gruppy(message: types.Message, state: FSMContext):
         'Телефон': dannie_usera.get('nomer_telefona'),
         'ФИО': dannie_usera.get('fio'),
         'Группа': dannie_usera.get('gruppa'),
+        'Телеграм': dannie_usera.get('telegram_id'),
         # ... и другие колонки
     }
     dobavit_usera(zapis)
     
     await message.answer("Ты успешно зарегистрирован!")
     # и снова переход в главное меню
-    await state.set_state(None)
+    await state.clear()
     await message.answer("Главное меню:", reply_markup=menu_kb)
 
 # --- Информационные разделы ---
@@ -313,17 +336,9 @@ async def send_info(callback: types.CallbackQuery):
 # --- Личный кабинет ---
 @dp.message(F.text == "Личный кабинет")
 async def lichnyi_kabinet(message: types.Message):
-    user_id = message.from_user.id
-    nomer_telefona = user_phone_numbers.get(user_id)
-
-    if not nomer_telefona:
-        await message.answer("Ой, я не смог найти твой номер. Пожалуйста, перезапусти бота командой /start")
-        return
-
-    user_data = nayti_usera_po_nomeru(nomer_telefona)
-
+    user_data = nayti_usera_po_telegram_id(message.from_user.id)
     if user_data is None:
-        await message.answer("Хм, не нашел тебя в базе доноров. Возможно, ты еще не зарегистрировался? Попробуй /start")
+        await message.answer("Хм, не нашел тебя в базе доноров. Пожалуйста, перезапусти бота командой /start, чтобы авторизоваться.")
         return
 
     fio = user_data.get('ФИО', 'Не указано')
@@ -378,15 +393,24 @@ async def lichnyi_kabinet(message: types.Message):
 
     await message.answer(text, parse_mode="Markdown")
 
-
-# --- Запуск бота ---
-
 # --- Вопросы организаторам ---
-
-@dp.message(lambda msg: msg.text == "Вопрос организаторам")
-async def start_question(message: types.Message, state: FSMContext):
+# Единый обработчик для начала диалога с вопросом
+async def start_question_dialog(message_or_callback: Union[types.Message, types.CallbackQuery], state: FSMContext):
+    if isinstance(message_or_callback, types.CallbackQuery):
+        await message_or_callback.message.edit_reply_markup(reply_markup=None)
+        message = message_or_callback.message
+    else:
+        message = message_or_callback
     await message.answer("Напиши свой вопрос, и я передам его организаторам.", reply_markup=ReplyKeyboardRemove())
     await state.set_state(SostoyaniyaVoprosa.ozhidanie_voprosa)
+
+@dp.message(F.text == "Вопрос организаторам")
+async def start_question_text(message: types.Message, state: FSMContext):
+    await start_question_dialog(message, state)
+
+@dp.callback_query(F.data == "ask_question_inline")
+async def start_question_inline(callback: types.CallbackQuery, state: FSMContext):
+    await start_question_dialog(callback, state)
 
 
 @dp.message(SostoyaniyaVoprosa.ozhidanie_voprosa)
@@ -415,7 +439,11 @@ async def answer_to_user(message: types.Message):
 
 # --- Запуск бота ---
 async def main():
+    logging.info("Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Бот выключен") 
