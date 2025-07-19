@@ -310,7 +310,8 @@ async def obrabotchik_gruppy(message: types.Message, state: FSMContext):
 async def info_section(message: types.Message):
     await message.answer("Выберите интересующий вас раздел:", reply_markup=knopki_info)
 
-@dp.callback_query(F.data.startswith("info_"))
+# Фильтр теперь более точный и не ловит "info_back"
+@dp.callback_query(F.data.in_(["info_krov", "info_kostniy_mozg", "info_mifi"]))
 async def send_info(callback: types.CallbackQuery):
     action = callback.data.removeprefix("info_")
     text = ""
@@ -353,11 +354,11 @@ async def send_info(callback: types.CallbackQuery):
 # Хендлер возврата из инфо-раздела
 @dp.callback_query(F.data == "info_back")
 async def info_back(callback: types.CallbackQuery):
+    # Удаляем текущее сообщение с текстом
+    await callback.message.delete()
+    # И присылаем новое с выбором разделов
+    await callback.message.answer("Выберите интересующий вас раздел:", reply_markup=knopki_info)
     await callback.answer()
-    try:
-        await callback.message.edit_text("Выберите интересующий вас раздел:", reply_markup=knopki_info)
-    except TelegramBadRequest:
-        await callback.message.edit_reply_markup(reply_markup=knopki_info)
 
 # --- Личный кабинет ---
 @dp.message(F.text == "Личный кабинет")
