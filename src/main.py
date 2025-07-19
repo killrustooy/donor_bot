@@ -14,12 +14,19 @@ bot = Bot(token='8104630789:AAGAZ-ITfW3F0Rtno-h8iFUIiKqkxl1gqu0')
 dp = Dispatcher()
 FILE_PUT = "donors.xlsx"
 
+# Простое хранилище в памяти для связки user_id -> phone_number
+user_phone_numbers = {}
+
 # ID чата, куда пересылаются вопросы
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "-1002709368305"))
 
 # --- Главное меню ---
 menu_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="Вопрос организаторам")]],
+    keyboard=[
+        [KeyboardButton(text="Личный кабинет")],
+        [KeyboardButton(text="Информация о донорстве")],
+        [KeyboardButton(text="Вопрос организаторам")]
+    ],
     resize_keyboard=True
 )
 
@@ -66,6 +73,16 @@ knopki_podtverzhdeniya_fio = InlineKeyboardMarkup(
     ]
 )
 
+# --- Клавиатуры для инфо-разделов ---
+knopki_info = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="О донорстве крови", callback_data="info_krov")],
+        [InlineKeyboardButton(text="О донорстве костного мозга", callback_data="info_kostniy_mozg")],
+        [InlineKeyboardButton(text="О донациях в МИФИ", callback_data="info_mifi")]
+    ]
+)
+
+
 # Функция для поиска пользователя по номеру телефона
 def nayti_usera_po_nomeru(nomer_telefona):
     try:
@@ -106,6 +123,9 @@ async def command_start(message: types.Message, state: FSMContext):
 @dp.message(F.contact)
 async def contact_handler(message: types.Message, state: FSMContext):
     nomer_telefona = message.contact.phone_number.replace("+", "")
+    user_id = message.from_user.id
+    user_phone_numbers[user_id] = nomer_telefona # Сохраняем номер в наш словарь
+    
     await state.update_data(nomer_telefona=nomer_telefona, username=message.from_user.username)  # Сохраняем номер и username
     
     # убираем кнопку с номером телефона
@@ -244,6 +264,120 @@ async def obrabotchik_gruppy(message: types.Message, state: FSMContext):
     # и снова переход в главное меню
     await state.set_state(None)
     await message.answer("Главное меню:", reply_markup=menu_kb)
+
+# --- Информационные разделы ---
+@dp.message(F.text == "Информация о донорстве")
+async def info_section(message: types.Message):
+    await message.answer("Выберите интересующий вас раздел:", reply_markup=knopki_info)
+
+@dp.callback_query(F.data.startswith("info_"))
+async def send_info(callback: types.CallbackQuery):
+    action = callback.data.removeprefix("info_")
+    text = ""
+    if action == "krov":
+        text = (
+            "**Требования к донорам:**\n"
+            "- Возраст от 18 до 60 лет\n"
+            "- Вес не менее 50 кг\n"
+            "- Отсутствие противопоказаний\n\n"
+            "**Подготовка к донации:**\n"
+            "- За 48 часов не употреблять алкоголь\n"
+            "- Накануне вечером легкий ужин\n"
+            "- Утром легкий завтрак (сладкий чай, сухари)\n\n"
+            "Полный список противопоказаний можно найти на сайте Центра Крови."
+        )
+    elif action == "kostniy_mozg":
+        text = (
+            "**Донорство костного мозга - это важно!**\n"
+            "Это шанс спасти жизнь человека, больного лейкозом или другим заболеванием крови.\n\n"
+            "**Как вступить в регистр:**\n"
+            "1. Сдать пробирку крови (4 мл) на донорской акции.\n"
+            "2. Заполнить анкету.\n\n"
+            "**Процесс донации:**\n"
+            "Процедура похожа на сдачу тромбоцитов и абсолютно безопасна."
+        )
+    elif action == "mifi":
+        text = (
+            "**Дни донора в НИЯУ МИФИ:**\n"
+            "1. Зарегистрируйся в боте на ближайшую дату.\n"
+            "2. Приходи в указанное время и место.\n"
+            "3. Не забудь паспорт и хорошее настроение!\n\n"
+            "**Ближайший День Донора:**\n"
+            "Следите за анонсами!"
+        )
+    
+    await callback.message.edit_text(text, parse_mode="Markdown")
+    # Чтобы убрать часики на кнопке
+    await callback.answer()
+
+# --- Личный кабинет ---
+@dp.message(F.text == "Личный кабинет")
+async def lichnyi_kabinet(message: types.Message):
+    user_id = message.from_user.id
+    nomer_telefona = user_phone_numbers.get(user_id)
+
+    if not nomer_telefona:
+        await message.answer("Ой, я не смог найти твой номер. Пожалуйста, перезапусти бота командой /start")
+        return
+
+    user_data = nayti_usera_po_nomeru(nomer_telefona)
+
+    if user_data is None:
+        await message.answer("Хм, не нашел тебя в базе доноров. Возможно, ты еще не зарегистрировался? Попробуй /start")
+        return
+
+    fio = user_data.get('ФИО', 'Не указано')
+    donations_gavrilova = user_data.get('Кол-во Гаврилова', 0)
+    donations_fmba = user_data.get('Кол-во ФМБА', 0)
+    total_donations = donations_gavrilova + donations_fmba
+
+    last_donation_gavrilova = user_data.get('Дата последней донации Гаврилова')
+    last_donation_fmba = user_data.get('Дата последней донации ФМБА')
+
+    last_donation_date = None
+    last_donation_center = ""
+
+    # Преобразуем строки в даты, если они есть
+    if pd.notna(last_donation_gavrilova):
+        date_gavrilova = pd.to_datetime(last_donation_gavrilova)
+    else:
+        date_gavrilova = None
+
+    if pd.notna(last_donation_fmba):
+        date_fmba = pd.to_datetime(last_donation_fmba)
+    else:
+        date_fmba = None
+
+    if date_gavrilova and date_fmba:
+        if date_gavrilova > date_fmba:
+            last_donation_date = date_gavrilova.strftime('%d.%m.%Y')
+            last_donation_center = "в ЦК им. Гаврилова"
+        else:
+            last_donation_date = date_fmba.strftime('%d.%m.%Y')
+            last_donation_center = "в ЦК ФМБА"
+    elif date_gavrilova:
+        last_donation_date = date_gavrilova.strftime('%d.%m.%Y')
+        last_donation_center = "в ЦК им. Гаврилова"
+    elif date_fmba:
+        last_donation_date = date_fmba.strftime('%d.%m.%Y')
+        last_donation_center = "в ЦК ФМБА"
+
+
+    text = (
+        f"👤 **Твой личный кабинет**\n\n"
+        f"**ФИО:** {fio}\n"
+        f"**Всего донаций:** {total_donations}\n"
+    )
+
+    if last_donation_date:
+        text += f"**Последняя донация:** {last_donation_date} {last_donation_center}\n"
+    else:
+        text += "**Последняя донация:** Данных нет\n"
+
+    text += "**В регистре ДКМ:** Нет данных" # Этой колонки пока нет
+
+    await message.answer(text, parse_mode="Markdown")
+
 
 # --- Запуск бота ---
 
